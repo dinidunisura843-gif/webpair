@@ -1,7 +1,7 @@
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
 const { exec } = require("child_process");
-let router = express.Router()
 const pino = require("pino");
 const {
     default: makeWASocket,
@@ -13,95 +13,145 @@ const {
 } = require("@whiskeysockets/baileys");
 const { upload } = require('./mega');
 
+const router = express.Router();
+
+// 🧹 Helper: delete files/folders safely
 function removeFile(FilePath) {
-    if (!fs.existsSync(FilePath)) return false;
-    fs.rmSync(FilePath, { recursive: true, force: true });
+    if (fs.existsSync(FilePath)) {
+        fs.rmSync(FilePath, { recursive: true, force: true });
+    }
 }
 
+// 🧠 Helper: generate random MEGA file IDs
+function randomMegaId(length = 6, numberLength = 4) {
+    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += characters.charAt(Math.floor(Math.random() * characters.length));
+    }
+    const number = Math.floor(Math.random() * Math.pow(10, numberLength));
+    return `${result}${number}`;
+}
+
+// 🚀 Main route
 router.get('/', async (req, res) => {
     let num = req.query.number;
-    async function DanuwaPair() {
-        const { state, saveCreds } = await useMultiFileAuthState(`./session`);
+
+    if (!num) {
+        return res.status(400).json({ error: "Missing ?number= parameter" });
+    }
+
+    num = num.replace(/[^0-9]/g, '');
+
+    const sessionPath = path.join(__dirname, 'sessions', num);
+    if (!fs.existsSync(path.dirname(sessionPath))) {
+        fs.mkdirSync(path.dirname(sessionPath), { recursive: true });
+    }
+
+    async function startPairing() {
         try {
-            let DanuwaPairWeb = makeWASocket({
+            const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+
+            const sock = makeWASocket({
                 auth: {
                     creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
+                    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
                 },
                 printQRInTerminal: false,
-                logger: pino({ level: "fatal" }).child({ level: "fatal" }),
+                logger: pino({ level: "fatal" }),
                 browser: Browsers.macOS("Safari"),
             });
 
-            if (!DanuwaPairWeb.authState.creds.registered) {
+            // Step 1: Request pairing code
+            if (!sock.authState.creds.registered) {
                 await delay(1500);
-                num = num.replace(/[^0-9]/g, '');
-                const code = await DanuwaPairWeb.requestPairingCode(num);
+                const code = await sock.requestPairingCode(num);
                 if (!res.headersSent) {
-                    await res.send({ code });
+                    res.status(200).json({
+                        number: num,
+                        pairing_code: code,
+                        status: "waiting_for_pairing"
+                    });
                 }
             }
 
-            DanuwaPairWeb.ev.on('creds.update', saveCreds);
-            DanuwaPairWeb.ev.on("connection.update", async (s) => {
-                const { connection, lastDisconnect } = s;
+            sock.ev.on('creds.update', saveCreds);
+
+            // Step 2: Connection handling
+            sock.ev.on("connection.update", async (update) => {
+                const { connection, lastDisconnect } = update;
+
                 if (connection === "open") {
                     try {
-                        await delay(10000);
-                        const sessionDanuwa = fs.readFileSync('./session/creds.json');
+                        console.log(`✅ ${num} paired successfully!`);
+                        await delay(8000);
 
-                        const auth_path = './session/';
-                        const user_jid = jidNormalizedUser(DanuwaPairWeb.user.id);
+                        const credsFile = path.join(sessionPath, 'creds.json');
+                        if (!fs.existsSync(credsFile)) return;
 
-                      function randomMegaId(length = 6, numberLength = 4) {
-                      const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-                      let result = '';
-                      for (let i = 0; i < length; i++) {
-                      result += characters.charAt(Math.floor(Math.random() * characters.length));
-                        }
-                       const number = Math.floor(Math.random() * Math.pow(10, numberLength));
-                        return `${result}${number}`;
-                        }
+                        const mega_url = await upload(
+                            fs.createReadStream(credsFile),
+                            `${randomMegaId()}.json`
+                        );
 
-                        const mega_url = await upload(fs.createReadStream(auth_path + 'creds.json'), `${randomMegaId()}.json`);
+                        const session_id = mega_url.replace('https://mega.nz/file/', '');
+                        const user_jid = jidNormalizedUser(sock.user.id);
 
-                        const string_session = mega_url.replace('https://mega.nz/file/', '');
-
-                        const sid = string_session;
-
-                        const dt = await DanuwaPairWeb.sendMessage(user_jid, {
-                            text: sid
+                        // Send session ID to the linked WhatsApp
+                        await sock.sendMessage(user_jid, {
+                            text: `✅ Your session ID:\n${session_id}`
                         });
 
-                    } catch (e) {
+                        console.log(`🧾 Session ID for ${num}: ${session_id}`);
+
+                        // Cleanup
+                        removeFile(sessionPath);
+
+                        // Optional: respond via HTTP if not already sent
+                        if (!res.headersSent) {
+                            res.status(200).json({
+                                number: num,
+                                session_id,
+                                status: "uploaded"
+                            });
+                        }
+
+                        sock.end();
+                    } catch (err) {
+                        console.error("Upload/Send error:", err);
                         exec('pm2 restart danuwa');
                     }
+                }
 
-                    await delay(100);
-                    return await removeFile('./session');
-                    process.exit(0);
-                } else if (connection === "close" && lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode !== 401) {
-                    await delay(10000);
-                    DanuwaPair();
+                // Auto-reconnect for non-auth errors
+                else if (connection === "close" && lastDisconnect &&
+                         lastDisconnect.error &&
+                         lastDisconnect.error.output?.statusCode !== 401) {
+                    console.log(`⚠️ Reconnecting for ${num}...`);
+                    await delay(5000);
+                    startPairing();
                 }
             });
+
         } catch (err) {
-            exec('pm2 restart danuwa-md');
-            console.log("service restarted");
-            DanuwaPair();
-            await removeFile('./session');
+            console.error("❌ Pairing error:", err);
+            removeFile(sessionPath);
+
             if (!res.headersSent) {
-                await res.send({ code: "Service Unavailable" });
+                res.status(500).json({ error: "Service unavailable" });
             }
+
+            exec('pm2 restart danuwa-md');
         }
     }
-    return await DanuwaPair();
+
+    await startPairing();
 });
 
-process.on('uncaughtException', function (err) {
-    console.log('Caught exception: ' + err);
+// Global crash handler
+process.on('uncaughtException', (err) => {
+    console.log('Caught exception:', err);
     exec('pm2 restart danuwa');
 });
-
 
 module.exports = router;
