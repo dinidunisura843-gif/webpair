@@ -1,21 +1,29 @@
 const mega = require("megajs");
+require('dotenv').config();
+
 const auth = {
-    email: 'gvchemal@gmail.com',
-    password: '3214@hcml',
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246'
-}
+    email: process.env.gvchemal@gmail.com,
+    password: process.env.3214@hcml,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)...'
+};
 
 const upload = (data, name) => {
     return new Promise((resolve, reject) => {
         try {
             const storage = new mega.Storage(auth, () => {
-                data.pipe(storage.upload({name: name, allowUploadBuffering: true}));
+                const up = storage.upload({ name, allowUploadBuffering: true });
+                data.pipe(up);
+
                 storage.on("add", (file) => {
                     file.link((err, url) => {
-                        if (err) throw err;
-                        storage.close()
+                        if (err) return reject(err);
+                        storage.close();
                         resolve(url);
                     });
+                });
+
+                storage.on("error", (err) => {
+                    reject(err);
                 });
             });
         } catch (err) {
